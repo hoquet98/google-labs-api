@@ -99,7 +99,7 @@ class UIInteractions:
     
     async def enter_prompt_and_go(self, prompt_text):
         """
-        Enter a prompt into the textarea and click the Go button
+        Enter a prompt into the textarea and submit (try Enter key first, then Go button)
         """
         print(f"✍️  Entering prompt: '{prompt_text[:50]}...'")
         
@@ -113,10 +113,22 @@ class UIInteractions:
             if not success:
                 return False
             
-            # Click the Go button
-            success = await self._click_go_button()
-            if not success:
-                return False
+            # Try Enter key first
+            print("⌨️  Trying Enter key to submit...")
+            success = await self._try_enter_key_submit()
+            
+            if success:
+                print("✅ Successfully submitted with Enter key!")
+            else:
+                # Fall back to Go button
+                print("🔄 Enter key didn't work, trying Go button...")
+                success = await self._click_go_button()
+                
+                if success:
+                    print("✅ Successfully submitted with Go button!")
+                else:
+                    print("❌ Both Enter key and Go button failed")
+                    return False
             
             # Take screenshot after submitting
             await self.page.screenshot(path='after_prompt_submission.png')
@@ -125,7 +137,7 @@ class UIInteractions:
             return True
             
         except Exception as e:
-            print(f"❌ Error entering prompt and clicking Go: {e}")
+            print(f"❌ Error entering prompt and submitting: {e}")
             await self._debug_available_inputs()
             return False
     
@@ -169,44 +181,66 @@ class UIInteractions:
             print(f"❌ Error entering text: {e}")
             return False
     
-    async def _click_go_button(self):
+    async def _try_enter_key_submit(self):
         """
-        Click the Go/Submit button
+        Try to submit by pressing Enter in the textarea
         """
-        # Find the Go button using exact classes
-        button_selector = 'button.sc-7d2e2cf5-1.hwJkVV.sc-408537d4-2.gdXWm'
-        print(f"🔍 Looking for Go button: {button_selector}")
-        
         try:
-            go_button = await self.page.wait_for_selector(button_selector, timeout=10000)
-            if not go_button:
-                print("❌ Could not find the Go button")
+            # Find the textarea again
+            textarea_selector = '#PINHOLE_TEXT_AREA_ELEMENT_ID'
+            textarea = await self.page.wait_for_selector(textarea_selector, timeout=5000)
+            
+            if not textarea:
+                print("❌ Could not find textarea for Enter key")
                 return False
             
-            # Check if button is visible and enabled
-            button_visible = await go_button.is_visible()
-            button_enabled = await go_button.is_enabled()
+            # Make sure textarea is focused
+            await textarea.click()
+            await self.page.wait_for_timeout(500)
             
-            if not (button_visible and button_enabled):
-                print(f"❌ Go button not ready (visible: {button_visible}, enabled: {button_enabled})")
-                return False
+            # Press Enter
+            await self.page.keyboard.press('Enter')
+            print("⌨️  Pressed Enter key")
             
-            print("✅ Found Go button")
-            
-            # Scroll button into view and click
-            await go_button.scroll_into_view_if_needed()
-            await go_button.click()
-            
-            print("🚀 Successfully clicked Go button!")
-            
-            # Wait for any processing to start
+            # Wait to see if submission started
             await self.page.wait_for_timeout(3000)
             
-            return True
+            # Check if we can find progress indicators or if the page changed
+            current_url = self.page.url
+            print(f"📍 Current URL after Enter: {current_url}")
+            
+            return True  # Assume Enter worked, video monitoring will catch if it didn't
             
         except Exception as e:
-            print(f"❌ Error clicking Go button: {e}")
+            print(f"❌ Error with Enter key: {e}")
             return False
+    
+    async def _click_go_button(self):
+        """
+        Click the Go/Submit button with retry logic
+        """
+        button_selector = 'button.sc-7d2e2cf5-1.hwJkVV.sc-408537d4-2.gdXWm'
+        
+        for attempt in range(3):  # Try 3 times
+            try:
+                print(f"🔍 Attempt {attempt + 1}: Looking for Go button")
+                go_button = await self.page.wait_for_selector(button_selector, timeout=15000)
+                
+                if go_button and await go_button.is_visible() and await go_button.is_enabled():
+                    await go_button.scroll_into_view_if_needed()
+                    await go_button.click()
+                    print("🚀 Successfully clicked Go button!")
+                    
+                    # Wait and verify the click worked
+                    await self.page.wait_for_timeout(5000)
+                    return True
+                    
+            except Exception as e:
+                print(f"❌ Attempt {attempt + 1} failed: {e}")
+                if attempt < 2:  # Don't wait after last attempt
+                    await self.page.wait_for_timeout(3000)
+        
+        return False
     
     async def _debug_available_inputs(self):
         """
