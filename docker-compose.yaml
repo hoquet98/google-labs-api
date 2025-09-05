@@ -4,7 +4,7 @@ services:
   google-labs-api:
     build: .
     ports:
-      - "8000:8000"
+      - "8001:8000"
     environment:
       - PORT=8000
       - HOST=0.0.0.0
@@ -18,3 +18,4 @@ services:
       timeout: 10s
       retries: 3
       start_period: 40s
+
