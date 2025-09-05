@@ -1,37 +1,11 @@
-# Use Python 3.11 slim image
-FROM python:3.11-slim
+FROM mcr.microsoft.com/playwright/python:v1.40.0-jammy
 
 # Set working directory
 WORKDIR /app
 
-# Set environment variables
-ENV DEBIAN_FRONTEND=noninteractive
-ENV PYTHONPATH=/app
-
-# Install system dependencies for Playwright
-RUN apt-get update && apt-get install -y \
-    wget \
-    gnupg \
-    ca-certificates \
-    procps \
-    xvfb \
-    libnss3 \
-    libatk-bridge2.0-0 \
-    libdrm2 \
-    libxkbcommon0 \
-    libgtk-3-0 \
-    libgbm1 \
-    libasound2 \
-    && rm -rf /var/lib/apt/lists/*
-
-# Copy requirements first for better Docker layer caching
+# Copy requirements and install Python dependencies
 COPY requirements.txt .
-
-# Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
-
-# Install Playwright browsers with system dependencies
-RUN playwright install --with-deps chromium
 
 # Copy application code
 COPY . .
@@ -39,9 +13,10 @@ COPY . .
 # Create downloads directory
 RUN mkdir -p downloads
 
-# Set final environment variables
+# Set environment variables
 ENV PORT=8000
 ENV HOST=0.0.0.0
+ENV PYTHONPATH=/app
 
 # Expose port
 EXPOSE 8000
