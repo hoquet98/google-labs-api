@@ -4,6 +4,49 @@ Video monitoring and download functionality for Google Labs automation
 import asyncio
 import aiohttp
 import os
+import boto3
+from botocore.exceptions import ClientError
+import tempfile
+import logging
+
+logger = logging.getLogger(__name__)
+
+class S3Config:
+    def __init__(self):
+        self.endpoint_url = os.getenv('S3_ENDPOINT_URL', 'http://minio:9000')
+        self.access_key = os.getenv('S3_ACCESS_KEY')
+        self.secret_key = os.getenv('S3_SECRET_KEY')
+        self.bucket_name = os.getenv('S3_BUCKET_NAME', 'google-labs-videos')
+        self.region = os.getenv('S3_REGION', 'us-east-1')
+
+def get_s3_client():
+    """Get configured S3 client for MinIO"""
+    config = S3Config()
+    
+    return boto3.client(
+        's3',
+        endpoint_url=config.endpoint_url,
+        aws_access_key_id=config.access_key,
+        aws_secret_access_key=config.secret_key,
+        region_name=config.region
+    )
+
+def ensure_bucket_exists(s3_client, bucket_name):
+    """Create S3 bucket if it doesn't exist"""
+    try:
+        s3_client.head_bucket(Bucket=bucket_name)
+    except ClientError as e:
+        error_code = e.response['Error']['Code']
+        if error_code == '404':
+            try:
+                s3_client.create_bucket(Bucket=bucket_name)
+                logger.info(f"Created S3 bucket: {bucket_name}")
+            except ClientError as create_error:
+                logger.error(f"Failed to create bucket {bucket_name}: {create_error}")
+                raise
+        else:
+            logger.error(f"Error checking bucket {bucket_name}: {e}")
+            raise
 
 async def monitor_video_progress(page):
     """
@@ -63,39 +106,70 @@ async def monitor_video_progress(page):
         print(f"❌ Error monitoring progress: {e}")
         return False
 
-async def download_video(session, video_url, filename):
+async def download_and_upload_video(session, video_url, s3_key, job_id=None):
     """
-    Download a single video from URL
+    Download video from URL and upload directly to S3
     """
     try:
-        print(f"⬇️  Downloading: {filename}")
+        print(f"⬇️  Downloading and uploading: {s3_key}")
         
+        # Download video to temporary file
         async with session.get(video_url) as response:
             if response.status == 200:
-                # Create downloads directory if it doesn't exist
-                os.makedirs('downloads', exist_ok=True)
-                
-                filepath = os.path.join('downloads', filename)
-                
-                with open(filepath, 'wb') as f:
+                # Create temporary file
+                with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as temp_file:
+                    temp_path = temp_file.name
+                    
+                    # Download to temp file
                     async for chunk in response.content.iter_chunked(8192):
-                        f.write(chunk)
+                        temp_file.write(chunk)
                 
-                print(f"✅ Downloaded: {filepath}")
-                return filepath
+                # Upload to S3
+                try:
+                    s3_client = get_s3_client()
+                    config = S3Config()
+                    
+                    # Ensure bucket exists
+                    ensure_bucket_exists(s3_client, config.bucket_name)
+                    
+                    # Upload file
+                    s3_client.upload_file(
+                        temp_path, 
+                        config.bucket_name, 
+                        s3_key,
+                        ExtraArgs={'ContentType': 'video/mp4'}
+                    )
+                    
+                    # Generate S3 URL
+                    s3_url = f"{config.endpoint_url}/{config.bucket_name}/{s3_key}"
+                    
+                    print(f"✅ Uploaded to S3: {s3_url}")
+                    
+                    # Clean up temp file
+                    os.unlink(temp_path)
+                    
+                    return s3_url
+                    
+                except ClientError as e:
+                    print(f"❌ S3 upload failed: {e}")
+                    # Clean up temp file on error
+                    if os.path.exists(temp_path):
+                        os.unlink(temp_path)
+                    return None
+                    
             else:
-                print(f"❌ Failed to download {filename}: HTTP {response.status}")
+                print(f"❌ Failed to download video: HTTP {response.status}")
                 return None
                 
     except Exception as e:
-        print(f"❌ Error downloading {filename}: {e}")
+        print(f"❌ Error downloading/uploading video: {e}")
         return None
 
-async def download_generated_videos(page):
+async def download_generated_videos(page, job_id=None):
     """
-    Find and download all generated videos
+    Find and download all generated videos, upload to S3
     """
-    print("🎬 Looking for generated videos to download...")
+    print("🎬 Looking for generated videos to download and upload to S3...")
     
     try:
         # Wait for videos to be fully loaded
@@ -108,9 +182,9 @@ async def download_generated_videos(page):
             print("❌ No videos found to download")
             return []
         
-        print(f"🎯 Found {len(video_elements)} videos to download")
+        print(f"🎯 Found {len(video_elements)} videos to download and upload")
         
-        downloaded_files = []
+        uploaded_urls = []
         
         # Create aiohttp session for downloads
         async with aiohttp.ClientSession() as session:
@@ -118,54 +192,55 @@ async def download_generated_videos(page):
                 try:
                     video_url = await video_element.get_attribute('src')
                     if video_url:
-                        # Generate filename
-                        filename = f"google_labs_video_{i}.mp4"
+                        # Generate S3 key (path in bucket)
+                        job_prefix = job_id or f"video_{int(asyncio.get_event_loop().time())}"
+                        s3_key = f"google-labs/{job_prefix}/video_{i}.mp4"
                         
-                        # Download the video
-                        filepath = await download_video(session, video_url, filename)
-                        if filepath:
-                            downloaded_files.append(filepath)
+                        # Download and upload to S3
+                        s3_url = await download_and_upload_video(session, video_url, s3_key, job_id)
+                        if s3_url:
+                            uploaded_urls.append(s3_url)
                     
                 except Exception as e:
                     print(f"❌ Error processing video {i}: {e}")
         
-        if downloaded_files:
-            print(f"🎉 Successfully downloaded {len(downloaded_files)} videos!")
-            for file in downloaded_files:
-                print(f"   📁 {file}")
+        if uploaded_urls:
+            print(f"🎉 Successfully uploaded {len(uploaded_urls)} videos to S3!")
+            for url in uploaded_urls:
+                print(f"   🔗 {url}")
         else:
-            print("❌ No videos were downloaded successfully")
+            print("❌ No videos were uploaded successfully")
         
-        return downloaded_files
+        return uploaded_urls
         
     except Exception as e:
-        print(f"❌ Error downloading videos: {e}")
+        print(f"❌ Error downloading/uploading videos: {e}")
         return []
 
-async def handle_video_workflow(page):
+async def handle_video_workflow(page, job_id=None):
     """
-    Complete video workflow: monitor progress and download videos
+    Complete video workflow: monitor progress and upload to S3
     """
-    print("\n📊 Starting video monitoring and download workflow...")
+    print("\n📊 Starting video monitoring and S3 upload workflow...")
     
     # Monitor progress until completion
     progress_complete = await monitor_video_progress(page)
     
     if progress_complete:
-        print("\n⬇️  Videos are ready! Starting download...")
+        print("\n⬇️  Videos are ready! Starting download and S3 upload...")
         
-        # Download the generated videos
-        downloaded_files = await download_generated_videos(page)
+        # Download and upload the generated videos
+        uploaded_urls = await download_generated_videos(page, job_id)
         
-        if downloaded_files:
-            print(f"\n🎉 SUCCESS! Downloaded {len(downloaded_files)} videos:")
-            for file in downloaded_files:
-                print(f"   📁 {file}")
-            print("💡 Check the 'downloads' folder in your project directory")
-            return downloaded_files
+        if uploaded_urls:
+            print(f"\n🎉 SUCCESS! Uploaded {len(uploaded_urls)} videos to S3:")
+            for url in uploaded_urls:
+                print(f"   🔗 {url}")
+            print("💡 Videos are now stored in your MinIO S3 bucket")
+            return uploaded_urls
         else:
-            print("\n⚠️  Videos appeared ready but download failed")
-            print("💡 You can manually download them from the browser")
+            print("\n⚠️  Videos appeared ready but S3 upload failed")
+            print("💡 Check S3 credentials and connectivity")
             return []
     else:
         print("\n⏰ Progress monitoring timed out or failed")
