@@ -8,9 +8,11 @@ services:
     environment:
       - PORT=8000
       - HOST=0.0.0.0
-    volumes:
-      - ./downloads:/app/downloads
-      - ./logs:/app/logs
+      - S3_ENDPOINT_URL=http://95.216.191.180:9001
+      - S3_ACCESS_KEY=MqOOyfdwLq2IiXyxnpTV
+      - S3_SECRET_KEY=77hE0YbZi3uGzb0rNdLwCoDQKVz6JxByYh2H8I20
+      - S3_BUCKET_NAME=veo3
+      - S3_REGION=us-east-1
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8000/health')"]
@@ -18,4 +20,3 @@ services:
       timeout: 10s
       retries: 3
       start_period: 40s
-
