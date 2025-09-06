@@ -7,7 +7,7 @@ import os
 from cookie_handler import CookieHandler
 from navigation_handler import NavigationHandler
 from ui_interactions import UIInteractions
-from video_handler import handle_video_workflow
+from video_handler import download_generated_videos_and_images
 import logging
 
 logger = logging.getLogger(__name__)
@@ -175,8 +175,6 @@ class GoogleLabsService:
         """
         Modified video workflow with progress callbacks
         """
-        from video_handler import monitor_video_progress, download_generated_videos_and_images
-        
         progress_callback("Starting video monitoring and S3 upload workflow...")
         
         # Monitor progress until completion
