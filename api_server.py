@@ -132,35 +132,35 @@ async def generate_video_sync(request: VideoGenerationRequest):
             progress_callback=lambda msg: logger.info(f"Progress: {msg}")
         )
         
+        logger.info(f"Automation service returned: {result}")
+        
         if result["success"]:
-            # Move downloaded files to accessible location
-            video_files = []
-            download_urls = []
+            video_urls = result.get("videos", [])
+            logger.info(f"Got {len(video_urls)} video URLs from automation: {video_urls}")
             
-            for i, video_path in enumerate(result["videos"], 1):
-                if os.path.exists(video_path):
-                    # Create a simple accessible filename
-                    filename = f"sync_video_{i}_{int(asyncio.get_event_loop().time())}.mp4"
-                    new_path = f"downloads/{filename}"
-                    os.rename(video_path, new_path)
-                    video_files.append(filename)
-                    download_urls.append(f"/download-direct/{filename}")
-            
-            logger.info(f"Sync generation completed successfully with {len(video_files)} videos")
-            
-            return {
-                "success": True,
-                "message": "Video generation completed successfully",
-                "prompt": request.prompt,
-                "videos": video_files,
-                "download_urls": download_urls,
-                "video_count": len(video_files),
-                "blocking": True
-            }
-            
+            if video_urls and len(video_urls) > 0:
+                # These are already S3 URLs, so we can use them directly
+                download_urls = video_urls  # S3 URLs can be used directly for download
+                
+                logger.info(f"Returning success response with {len(video_urls)} videos")
+                logger.info(f"Video URLs: {video_urls}")
+                logger.info(f"Download URLs: {download_urls}")
+                
+                return {
+                    "success": True,
+                    "message": "Video generation completed successfully",
+                    "prompt": request.prompt,
+                    "videos": video_urls,
+                    "download_urls": download_urls,
+                    "video_count": len(video_urls),
+                    "blocking": True
+                }
+            else:
+                logger.error(f"Automation returned success but no video URLs: {result}")
+                raise HTTPException(status_code=500, detail="Video generation succeeded but no videos were returned")
         else:
-            logger.error(f"Sync generation failed: {result['error']}")
-            raise HTTPException(status_code=500, detail=result["error"])
+            logger.error(f"Automation service failed: {result}")
+            raise HTTPException(status_code=500, detail=result.get("error", "Video generation failed"))
             
     except Exception as e:
         error_msg = f"Synchronous video generation failed: {str(e)}"
@@ -362,4 +362,5 @@ if __name__ == "__main__":
         port=port,
         reload=False,
         log_level="info"
+
     )
