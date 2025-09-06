@@ -74,6 +74,7 @@ class GoogleLabsService:
             # Navigate to Google Labs
             success = await navigation_handler.navigate_to_google_labs()
             if not success:
+                logger.error(f"Job {job_id}: Navigation to Google Labs failed")
                 return {
                     "success": False,
                     "error": "Failed to navigate to Google Labs",
@@ -92,6 +93,7 @@ class GoogleLabsService:
             project_success = await ui_interactions.click_new_project()
             
             if not project_success:
+                logger.error(f"Job {job_id}: Failed to create new project")
                 return {
                     "success": False,
                     "error": "Failed to create new project - cookies may be expired",
@@ -106,6 +108,7 @@ class GoogleLabsService:
             video_success = await ui_interactions.enter_prompt_and_go(prompt)
             
             if not video_success:
+                logger.error(f"Job {job_id}: Failed to submit video generation prompt")
                 return {
                     "success": False,
                     "error": "Failed to submit video generation prompt",
@@ -114,22 +117,26 @@ class GoogleLabsService:
             
             # Monitor video processing and download
             update_progress("Monitoring video generation progress...")
-            downloaded_files = await self._handle_video_workflow_with_progress(
-                page, update_progress
+            video_urls = await self._handle_video_workflow_with_progress(
+                page, update_progress, job_id
             )
             
-            if downloaded_files:
-                update_progress(f"Successfully downloaded {len(downloaded_files)} videos!")
+            logger.info(f"Job {job_id}: Video workflow returned: {video_urls}")
+            
+            if video_urls and len(video_urls) > 0:
+                update_progress(f"Successfully uploaded {len(video_urls)} videos to S3!")
+                logger.info(f"Job {job_id}: Returning success with {len(video_urls)} S3 URLs: {video_urls}")
                 return {
                     "success": True,
                     "error": None,
-                    "videos": downloaded_files,
+                    "videos": video_urls,
                     "prompt": prompt
                 }
             else:
+                logger.error(f"Job {job_id}: No videos returned from workflow")
                 return {
                     "success": False,
-                    "error": "Video generation completed but download failed",
+                    "error": "Video generation completed but S3 upload failed - no videos returned",
                     "videos": []
                 }
                 
@@ -154,13 +161,13 @@ class GoogleLabsService:
                 except Exception as e:
                     logger.warning(f"Error during cleanup: {e}")
     
-    async def _handle_video_workflow_with_progress(self, page, progress_callback):
+    async def _handle_video_workflow_with_progress(self, page, progress_callback, job_id=None):
         """
         Modified video workflow with progress callbacks
         """
         from video_handler import monitor_video_progress, download_generated_videos
         
-        progress_callback("Starting video monitoring and download workflow...")
+        progress_callback("Starting video monitoring and S3 upload workflow...")
         
         # Monitor progress until completion
         progress_complete = await self._monitor_video_progress_with_callback(
@@ -168,19 +175,24 @@ class GoogleLabsService:
         )
         
         if progress_complete:
-            progress_callback("Videos are ready! Starting download...")
+            progress_callback("Videos are ready! Starting download and S3 upload...")
             
-            # Download the generated videos
-            downloaded_files = await download_generated_videos(page)
+            # Download and upload the generated videos to S3
+            s3_urls = await download_generated_videos(page, job_id)
             
-            if downloaded_files:
-                progress_callback(f"SUCCESS! Downloaded {len(downloaded_files)} videos")
-                return downloaded_files
+            logger.info(f"Job {job_id}: download_generated_videos returned: {s3_urls}")
+            
+            if s3_urls and len(s3_urls) > 0:
+                progress_callback(f"SUCCESS! Uploaded {len(s3_urls)} videos to S3")
+                logger.info(f"Job {job_id}: Successfully got {len(s3_urls)} S3 URLs")
+                return s3_urls
             else:
-                progress_callback("Videos appeared ready but download failed")
+                progress_callback("Videos appeared ready but S3 upload failed")
+                logger.error(f"Job {job_id}: S3 upload failed - empty URLs returned")
                 return []
         else:
             progress_callback("Progress monitoring timed out or failed")
+            logger.error(f"Job {job_id}: Progress monitoring failed")
             return []
     
     async def _monitor_video_progress_with_callback(self, page, progress_callback):
