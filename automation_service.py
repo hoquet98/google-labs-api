@@ -35,7 +35,7 @@ class GoogleLabsService:
             progress_callback: Function to call with progress updates
             
         Returns:
-            dict: Result with success status, videos list, or error message
+            dict: Result with success status, videos list, images list, or error message
         """
         
         def update_progress(message):
@@ -78,7 +78,8 @@ class GoogleLabsService:
                 return {
                     "success": False,
                     "error": "Failed to navigate to Google Labs",
-                    "videos": []
+                    "videos": [],
+                    "images": []
                 }
             
             # Check authentication
@@ -97,7 +98,8 @@ class GoogleLabsService:
                 return {
                     "success": False,
                     "error": "Failed to create new project - cookies may be expired",
-                    "videos": []
+                    "videos": [],
+                    "images": []
                 }
             
             # Wait for new project page to load
@@ -112,32 +114,39 @@ class GoogleLabsService:
                 return {
                     "success": False,
                     "error": "Failed to submit video generation prompt",
-                    "videos": []
+                    "videos": [],
+                    "images": []
                 }
             
             # Monitor video processing and download
             update_progress("Monitoring video generation progress...")
-            video_urls = await self._handle_video_workflow_with_progress(
+            result = await self._handle_video_workflow_with_progress(
                 page, update_progress, job_id
             )
             
-            logger.info(f"Job {job_id}: Video workflow returned: {video_urls}")
+            logger.info(f"Job {job_id}: Video workflow returned: {result}")
             
-            if video_urls and len(video_urls) > 0:
-                update_progress(f"Successfully uploaded {len(video_urls)} videos to S3!")
-                logger.info(f"Job {job_id}: Returning success with {len(video_urls)} S3 URLs: {video_urls}")
+            if result and (result.get("videos") or result.get("images")):
+                video_urls = result.get("videos", [])
+                image_urls = result.get("images", [])
+                
+                update_progress(f"Successfully uploaded {len(video_urls)} videos and {len(image_urls)} images to S3!")
+                logger.info(f"Job {job_id}: Returning success with {len(video_urls)} videos and {len(image_urls)} images")
+                
                 return {
                     "success": True,
                     "error": None,
                     "videos": video_urls,
+                    "images": image_urls,
                     "prompt": prompt
                 }
             else:
-                logger.error(f"Job {job_id}: No videos returned from workflow")
+                logger.error(f"Job {job_id}: No videos or images returned from workflow")
                 return {
                     "success": False,
-                    "error": "Video generation completed but S3 upload failed - no videos returned",
-                    "videos": []
+                    "error": "Video generation completed but S3 upload failed - no videos or images returned",
+                    "videos": [],
+                    "images": []
                 }
                 
         except Exception as e:
@@ -148,7 +157,8 @@ class GoogleLabsService:
             return {
                 "success": False,
                 "error": error_msg,
-                "videos": []
+                "videos": [],
+                "images": []
             }
             
         finally:
@@ -165,7 +175,7 @@ class GoogleLabsService:
         """
         Modified video workflow with progress callbacks
         """
-        from video_handler import monitor_video_progress, download_generated_videos
+        from video_handler import monitor_video_progress, download_generated_videos_and_images
         
         progress_callback("Starting video monitoring and S3 upload workflow...")
         
@@ -177,23 +187,25 @@ class GoogleLabsService:
         if progress_complete:
             progress_callback("Videos are ready! Starting download and S3 upload...")
             
-            # Download and upload the generated videos to S3
-            s3_urls = await download_generated_videos(page, job_id)
+            # Download and upload the generated videos and images to S3
+            result = await download_generated_videos_and_images(page, job_id)
             
-            logger.info(f"Job {job_id}: download_generated_videos returned: {s3_urls}")
+            logger.info(f"Job {job_id}: download_generated_videos_and_images returned: {result}")
             
-            if s3_urls and len(s3_urls) > 0:
-                progress_callback(f"SUCCESS! Uploaded {len(s3_urls)} videos to S3")
-                logger.info(f"Job {job_id}: Successfully got {len(s3_urls)} S3 URLs")
-                return s3_urls
+            if result and (result.get("videos") or result.get("images")):
+                video_count = len(result.get("videos", []))
+                image_count = len(result.get("images", []))
+                progress_callback(f"SUCCESS! Uploaded {video_count} videos and {image_count} images to S3")
+                logger.info(f"Job {job_id}: Successfully got {video_count} videos and {image_count} images")
+                return result
             else:
                 progress_callback("Videos appeared ready but S3 upload failed")
-                logger.error(f"Job {job_id}: S3 upload failed - empty URLs returned")
-                return []
+                logger.error(f"Job {job_id}: S3 upload failed - empty result returned")
+                return {"videos": [], "images": []}
         else:
             progress_callback("Progress monitoring timed out or failed")
             logger.error(f"Job {job_id}: Progress monitoring failed")
-            return []
+            return {"videos": [], "images": []}
     
     async def _monitor_video_progress_with_callback(self, page, progress_callback):
         """
