@@ -111,60 +111,40 @@ async def download_and_upload_video(session, video_url, s3_key, job_id=None):
     Download video from URL and upload directly to S3
     """
     try:
-        print(f"⬇️  Downloading and uploading: {s3_key}")
+        print(f"Downloading and uploading: {s3_key}")
         
-        # Download video to temporary file
         async with session.get(video_url) as response:
             if response.status == 200:
-                # Create temporary file
                 with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as temp_file:
                     temp_path = temp_file.name
-                    
-                    # Download to temp file
                     async for chunk in response.content.iter_chunked(8192):
                         temp_file.write(chunk)
                 
-                # Upload to S3
-                try:
-                    s3_client = get_s3_client()
-                    config = S3Config()
-                    
-                    # Ensure bucket exists
-                    ensure_bucket_exists(s3_client, config.bucket_name)
-                    
-                    # Upload file
-                    s3_client.upload_file(
-                        temp_path, 
-                        config.bucket_name, 
-                        s3_key,
-                        ExtraArgs={'ContentType': 'video/mp4'}
-                    )
-                    
-                    # Generate S3 URL
-                    s3_url = f"{config.endpoint_url}/{config.bucket_name}/{s3_key}"
-                    
-                    print(f"✅ Uploaded to S3: {s3_url}")
-                    
-                    # Clean up temp file
-                    os.unlink(temp_path)
-                    
-                    return s3_url
-                    
-                except ClientError as e:
-                    print(f"❌ S3 upload failed: {e}")
-                    # Clean up temp file on error
-                    if os.path.exists(temp_path):
-                        os.unlink(temp_path)
-                    return None
-                    
-            else:
-                print(f"❌ Failed to download video: HTTP {response.status}")
-                return None
+                # Simple S3 upload
+                s3_client = boto3.client(
+                    's3',
+                    endpoint_url=os.getenv('S3_ENDPOINT_URL'),
+                    aws_access_key_id=os.getenv('S3_ACCESS_KEY'),
+                    aws_secret_access_key=os.getenv('S3_SECRET_KEY'),
+                    region_name=os.getenv('S3_REGION', 'us-east-1')
+                )
+                
+                s3_client.upload_file(
+                    temp_path, 
+                    'veo3',  # hardcoded bucket name
+                    s3_key,
+                    ExtraArgs={'ContentType': 'video/mp4'}
+                )
+                
+                os.unlink(temp_path)
+                s3_url = f"{os.getenv('S3_ENDPOINT_URL')}/veo3/{s3_key}"
+                print(f"Uploaded to S3: {s3_url}")
+                return s3_url
                 
     except Exception as e:
-        print(f"❌ Error downloading/uploading video: {e}")
+        print(f"Error: {e}")
         return None
-
+        
 async def download_generated_videos(page, job_id=None):
     """
     Find and download all generated videos, upload to S3
@@ -246,3 +226,4 @@ async def handle_video_workflow(page, job_id=None):
         print("\n⏰ Progress monitoring timed out or failed")
         print("💡 Videos may still be processing - check the browser")
         return []
+
