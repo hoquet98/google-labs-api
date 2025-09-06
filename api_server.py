@@ -1,18 +1,113 @@
-# Add this to your api_server.py imports and models section
-
+"""
+FastAPI server for Google Labs automation
+Can be called from N8N workflows
+"""
+from fastapi import FastAPI, HTTPException, UploadFile, File, BackgroundTasks
+from fastapi.responses import JSONResponse, FileResponse
 from pydantic import BaseModel
+import asyncio
+import json
+import os
+import uuid
+import logging
 from typing import Optional, List
+from automation_service import GoogleLabsService
 
-# Updated Pydantic models
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+app = FastAPI(
+    title="Google Labs Video Generation API",
+    description="Generate videos using Google Labs and download them automatically",
+    version="1.0.0"
+)
+
+# Global service instance
+labs_service = GoogleLabsService()
+
+# Pydantic models for API requests
+class VideoGenerationRequest(BaseModel):
+    prompt: str
+    headless: bool = True
+    cookies_data: Optional[dict] = None
+
 class JobStatus(BaseModel):
     job_id: str
     status: str  # pending, running, completed, failed
     progress: Optional[str] = None
     videos: Optional[List[str]] = None
-    images: Optional[List[str]] = None  # NEW: Add images field
+    images: Optional[List[str]] = None
     error: Optional[str] = None
 
-# Update the synchronous endpoint response
+# In-memory job storage (in production, use Redis or database)
+jobs = {}
+
+@app.get("/")
+async def root():
+    """Health check endpoint"""
+    return {
+        "message": "Google Labs Video Generation API",
+        "status": "running",
+        "version": "1.0.0"
+    }
+
+@app.get("/health")
+async def health_check():
+    """Detailed health check"""
+    return {
+        "status": "healthy",
+        "service": "google-labs-api",
+        "timestamp": "2025-01-27T00:00:00Z"
+    }
+
+@app.post("/generate-video")
+async def generate_video_async(
+    request: VideoGenerationRequest,
+    background_tasks: BackgroundTasks
+):
+    """
+    NON-BLOCKING: Start video generation job
+    Returns job ID immediately for tracking progress
+    """
+    try:
+        # Generate unique job ID
+        job_id = str(uuid.uuid4())
+        
+        # Initialize job status
+        jobs[job_id] = {
+            "job_id": job_id,
+            "status": "pending",
+            "progress": None,
+            "videos": None,
+            "images": None,
+            "error": None,
+            "prompt": request.prompt
+        }
+        
+        # Start background task
+        background_tasks.add_task(
+            run_video_generation,
+            job_id,
+            request.prompt,
+            request.headless,
+            request.cookies_data
+        )
+        
+        logger.info(f"Started video generation job {job_id} with prompt: {request.prompt[:50]}...")
+        
+        return {
+            "job_id": job_id,
+            "status": "pending",
+            "message": "Video generation started",
+            "prompt": request.prompt,
+            "blocking": False
+        }
+        
+    except Exception as e:
+        logger.error(f"Error starting video generation: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.post("/generate-video-sync")
 async def generate_video_sync(request: VideoGenerationRequest):
     """
@@ -43,29 +138,27 @@ async def generate_video_sync(request: VideoGenerationRequest):
         
         if result["success"]:
             video_urls = result.get("videos", [])
-            image_urls = result.get("images", [])  # NEW: Get image URLs
-            
+            image_urls = result.get("images", [])
             logger.info(f"Got {len(video_urls)} video URLs and {len(image_urls)} image URLs from automation")
             
             if video_urls and len(video_urls) > 0:
                 # These are already S3 URLs, so we can use them directly
-                video_download_urls = video_urls  # S3 URLs can be used directly for download
-                image_download_urls = image_urls  # S3 URLs can be used directly for download
+                download_urls = video_urls  # S3 URLs can be used directly for download
                 
                 logger.info(f"Returning success response with {len(video_urls)} videos and {len(image_urls)} images")
+                logger.info(f"Video URLs: {video_urls}")
+                logger.info(f"Image URLs: {image_urls}")
+                logger.info(f"Download URLs: {download_urls}")
                 
                 return {
                     "success": True,
                     "message": "Video generation completed successfully",
                     "prompt": request.prompt,
                     "videos": video_urls,
-                    "images": image_urls,  # NEW: Include images in response
-                    "download_urls": {     # NEW: Organize download URLs
-                        "videos": video_download_urls,
-                        "images": image_download_urls
-                    },
+                    "images": image_urls,
+                    "download_urls": download_urls,
                     "video_count": len(video_urls),
-                    "image_count": len(image_urls),  # NEW: Include image count
+                    "image_count": len(image_urls),
                     "blocking": True
                 }
             else:
@@ -80,7 +173,111 @@ async def generate_video_sync(request: VideoGenerationRequest):
         logger.error(error_msg)
         raise HTTPException(status_code=500, detail=error_msg)
 
-# Update the asynchronous background task
+@app.get("/job/{job_id}")
+async def get_job_status(job_id: str):
+    """
+    Get status of a video generation job
+    """
+    if job_id not in jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    return jobs[job_id]
+
+@app.get("/jobs")
+async def list_jobs():
+    """
+    List all jobs (recent first)
+    """
+    job_list = list(jobs.values())
+    return {"jobs": job_list[-10:]}  # Return last 10 jobs
+
+@app.post("/upload-cookies")
+async def upload_cookies(file: UploadFile = File(...)):
+    """
+    Upload cookies JSON file
+    """
+    try:
+        # Read and validate cookies file
+        content = await file.read()
+        cookies_data = json.loads(content)
+        
+        # Save cookies to file
+        cookies_path = "uploaded_cookies.json"
+        with open(cookies_path, 'w') as f:
+            json.dump(cookies_data, f)
+        
+        logger.info(f"Uploaded cookies file with {len(cookies_data)} cookies")
+        
+        return {
+            "message": "Cookies uploaded successfully",
+            "cookie_count": len(cookies_data),
+            "filename": file.filename
+        }
+        
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="Invalid JSON format")
+    except Exception as e:
+        logger.error(f"Error uploading cookies: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/download-direct/{video_filename}")
+async def download_video_direct(video_filename: str):
+    """
+    Download a video file directly (for synchronous generation)
+    """
+    file_path = f"downloads/{video_filename}"
+    
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="Video file not found")
+    
+    return FileResponse(
+        path=file_path,
+        filename=video_filename,
+        media_type='video/mp4'
+    )
+
+@app.get("/download/{job_id}/{video_filename}")
+async def download_video(job_id: str, video_filename: str):
+    """
+    Download a generated video file (for asynchronous generation)
+    """
+    if job_id not in jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    file_path = f"downloads/{job_id}_{video_filename}"
+    
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="Video file not found")
+    
+    return FileResponse(
+        path=file_path,
+        filename=video_filename,
+        media_type='video/mp4'
+    )
+
+@app.delete("/job/{job_id}")
+async def delete_job(job_id: str):
+    """
+    Delete a job and its associated files
+    """
+    if job_id not in jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    # Clean up video files
+    try:
+        downloads_dir = "downloads"
+        if os.path.exists(downloads_dir):
+            for filename in os.listdir(downloads_dir):
+                if filename.startswith(job_id):
+                    os.remove(os.path.join(downloads_dir, filename))
+    except Exception as e:
+        logger.warning(f"Error cleaning up files for job {job_id}: {e}")
+    
+    # Remove job from memory
+    del jobs[job_id]
+    
+    return {"message": f"Job {job_id} deleted successfully"}
+
 async def run_video_generation(job_id: str, prompt: str, headless: bool, cookies_data: dict = None):
     """
     Background task to run video generation
@@ -109,15 +306,13 @@ async def run_video_generation(job_id: str, prompt: str, headless: bool, cookies
         )
         
         if result["success"]:
-            # Get both videos and images from the result
             video_urls = result.get("videos", [])
             image_urls = result.get("images", [])
             
-            # Store both in the job status
             jobs[job_id]["status"] = "completed"
             jobs[job_id]["videos"] = video_urls
-            jobs[job_id]["images"] = image_urls  # NEW: Store images
-            jobs[job_id]["progress"] = f"Completed! {len(video_urls)} videos and {len(image_urls)} images uploaded to S3"
+            jobs[job_id]["images"] = image_urls
+            jobs[job_id]["progress"] = f"Video generation completed! {len(video_urls)} videos and {len(image_urls)} images uploaded to S3"
             
             logger.info(f"Job {job_id} completed successfully with {len(video_urls)} videos and {len(image_urls)} images")
             
@@ -131,50 +326,41 @@ async def run_video_generation(job_id: str, prompt: str, headless: bool, cookies
         jobs[job_id]["error"] = str(e)
         logger.error(f"Job {job_id} failed with exception: {e}")
 
-# Update the async endpoint response
-@app.post("/generate-video")
-async def generate_video_async(
-    request: VideoGenerationRequest,
-    background_tasks: BackgroundTasks
-):
+def update_job_progress(job_id: str, message: str):
     """
-    NON-BLOCKING: Start video generation job
-    Returns job ID immediately for tracking progress
+    Update job progress message
     """
-    try:
-        # Generate unique job ID
-        job_id = str(uuid.uuid4())
-        
-        # Initialize job status with images field
-        jobs[job_id] = {
-            "job_id": job_id,
-            "status": "pending",
-            "progress": None,
-            "videos": None,
-            "images": None,  # NEW: Initialize images field
-            "error": None,
-            "prompt": request.prompt
-        }
-        
-        # Start background task
-        background_tasks.add_task(
-            run_video_generation,
-            job_id,
-            request.prompt,
-            request.headless,
-            request.cookies_data
-        )
-        
-        logger.info(f"Started video generation job {job_id} with prompt: {request.prompt[:50]}...")
-        
-        return {
-            "job_id": job_id,
-            "status": "pending",
-            "message": "Video generation started",
-            "prompt": request.prompt,
-            "blocking": False
-        }
-        
-    except Exception as e:
-        logger.error(f"Error starting video generation: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    if job_id in jobs:
+        jobs[job_id]["progress"] = message
+        logger.info(f"Job {job_id} progress: {message}")
+
+# Startup event to create necessary directories
+@app.on_event("startup")
+async def startup_event():
+    """
+    Initialize the application
+    """
+    os.makedirs("downloads", exist_ok=True)
+    logger.info("Google Labs API server started")
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """
+    Cleanup on shutdown
+    """
+    await labs_service.cleanup()
+    logger.info("Google Labs API server stopped")
+
+if __name__ == "__main__":
+    import uvicorn
+    
+    port = int(os.getenv("PORT", 8000))
+    host = os.getenv("HOST", "0.0.0.0")
+    
+    uvicorn.run(
+        "api_server:app",
+        host=host,
+        port=port,
+        reload=False,
+        log_level="info"
+    )
